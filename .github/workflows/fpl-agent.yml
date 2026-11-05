@@ -1,0 +1,57 @@
+# Runs the FPL agent every hour. Most runs end within a minute because no
+# deadline is close. About 6h and again about 2h before a deadline it builds a
+# plan and sends it to your Telegram. It only READS from FPL: it never changes
+# your team.
+name: fpl-agent
+
+on:
+  schedule:
+    - cron: "17 * * * *"        # every hour at :17 (GitHub is busiest on the hour)
+  workflow_dispatch:            # adds a "Run workflow" button in the Actions tab
+    inputs:
+      force:
+        description: "Send a plan now, whatever the time"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write               # lets the run save logs/ and state/ back to the repo
+
+concurrency:
+  group: fpl-agent              # never two runs at once
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Run agent
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FPL_TEAM_ID: ${{ secrets.FPL_TEAM_ID }}
+          FPL_TIMEZONE: ${{ vars.FPL_TIMEZONE }}
+        run: python -m fpl_agent tick ${{ inputs.force && '--force' || '' }}
+
+      - name: Save logs and state
+        if: always()                # keep state even when the run failed
+        run: |
+          mkdir -p logs state
+          git config user.name "fpl-agent"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add logs state
+          if git diff --cached --quiet; then echo "Nothing new to save"; exit 0; fi
+          git commit -m "fpl-agent: update logs and state"
+          git pull --rebase
+          git push

@@ -1,0 +1,14 @@
+# Local environment and caches: never upload these
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.fpl_cache/
+.dryrun/
+
+# Downloaded archives and local outputs
+data/
+preds.csv
+plan.json
+*.zip
