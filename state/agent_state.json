@@ -2,7 +2,9 @@
   "telegram_offset": 795874826,
   "ft": null,
   "sent": {
-    "10": []
+    "10": [
+      "final"
+    ]
   },
   "scored": [],
   "errors": []
