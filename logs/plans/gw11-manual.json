@@ -1,7 +1,7 @@
 {
   "gw": 11,
   "window": "manual",
-  "generated_at": "2026-11-08T13:18:28.280282+00:00",
+  "generated_at": "2026-11-08T14:00:50.869058+00:00",
   "deadline_utc": "2026-11-21 11:00:00+00:00",
   "free_transfers": 2,
   "ft_assumed": false,
@@ -36,7 +36,7 @@
     453
   ],
   "captain": 411,
-  "vice": 112,
+  "vice": 379,
   "expected_points": 59.42,
   "squad": [
     1,
@@ -157,10 +157,19 @@
   ],
   "chip_lines": [
     "<b>Chips</b>: 3 left, use by GW19 (9 GWs, one chip per GW)",
-    "\u2022 Triple Captain: hold, no week stands out yet (best GW16 +6.7 with Haaland, next +6.6)",
+    "\u2022 Triple Captain: hold, no week stands out yet (best GW16 +5.8 with Haaland, next +5.8)",
     "\u2022 Bench Boost: hold, no week stands out yet (best GW15 +14.0, next +13.6)",
-    "\u2022 Free Hit: hold, no week stands out yet (best GW19 +5.3, next +4.7)"
+    "\u2022 Free Hit: hold, no week stands out yet (best GW19 +5.3, next +4.3)"
   ],
+  "cap_score": {
+    "411": 5.64,
+    "379": 4.85,
+    "166": 4.38,
+    "68": 4.39,
+    "15": 4.31,
+    "40": 4.3,
+    "124": 3.8
+  },
   "notes": [
     "Free transfers set to 2 by your /ft command.",
     "Squad is as of the last deadline; transfers already made this week are not visible without a token."
