@@ -30,6 +30,21 @@ START_BUDGET = 100.0
 MAX_FREE_TRANSFERS = 5
 HIT_COST = 4
 
+# ---- Captaincy (see `python -m fpl_agent captain-study`) ---------------------
+# Only midfielders and forwards may captain, ranked by a "captain score": the
+# model's xPts corrected for each position's forecast bias (actual ≈ a + b·xPts,
+# fitted on 2023/24-2025/26 predictions with xPts >= 3). Out of sample this beat
+# the plain "highest xPts" rule in all three seasons (+0.3 to +0.6 captain
+# points per gameweek). Forwards' high forecasts run hottest: 8.0 xPts -> 6.8.
+# Refit after any change to the predictor.
+CAPTAIN_CALIBRATION = {MID: (-0.015, 0.936), FWD: (0.690, 0.763)}
+
+
+def captain_score(pos: int, xpts: float) -> float | None:
+    """Bias-corrected captain value, or None if that position may not captain."""
+    cal = CAPTAIN_CALIBRATION.get(pos)
+    return None if cal is None else cal[0] + cal[1] * xpts
+
 
 @dataclass
 class ModelParams:

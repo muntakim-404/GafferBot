@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from .chips import chip_outlook, format_chips, remaining_chips
-from .config import DEF, FWD, GK, MID, POS_NAME, ModelParams, SolverParams
+from .config import DEF, FWD, GK, MID, POS_NAME, ModelParams, SolverParams, captain_score
 from .data import load_live, team_state_public
 from .predictor import predict, xpts_matrix
 from .solver import solve, validate
@@ -108,12 +108,13 @@ def format_plan(p: dict, tz: str, now: pd.Timestamp) -> str:
     lines.append("")
 
     cap, vice = p["captain"], p["vice"]
-    lines.append(f"<b>Captain</b>: {nm(cap)} ({xp(cap):.1f}) · <b>Vice</b>: {nm(vice)} ({xp(vice):.1f})")
-    ranked = sorted(p["lineup"], key=lambda i: -xp(i))
-    close = [i for i in ranked if xp(cap) - xp(i) < CLOSE_CAPTAIN]
-    if len(close) > 1:
-        opts = ", ".join(f"{nm(i)} {xp(i):.1f}" for i in close[:3])
-        lines.append(f"⚠️ Close call ({opts}). The model can't reliably separate these; your choice.")
+    lines.append(f"<b>Captain</b>: {nm(cap)} · <b>Vice</b>: {nm(vice)}")
+    cs = {int(k): v for k, v in p.get("cap_score", {}).items()}
+    if cs:
+        ranked = sorted(cs, key=lambda i: -cs[i])
+        lines.append("Captain scores (bias-corrected): " + " · ".join(f"{nm(i)} {cs[i]:.1f}" for i in ranked[:3]))
+        if len(ranked) > 1 and cs[ranked[0]] - cs[ranked[1]] < CLOSE_CAPTAIN:
+            lines.append("⚠️ Close call: the top two are within the model's error; your choice.")
     lines.append("")
 
     lines.append(f"<b>XI</b> (expected {p['expected_points']:.1f} incl. captain)")
@@ -206,6 +207,8 @@ def build_plan(cfg: AgentConfig, client, ft_override: int | None, window: str, n
         "price": {str(i): float(info.at[i, "price"]) for i in ids},
         "sell": {str(i): float(state.selling_price.get(i, info.at[i, "price"])) for i in ids},
         "injuries": injuries, "later": later, "chip_lines": chip_lines,
+        "cap_score": {str(i): round(captain_score(int(info.at[i, "pos"]), float(xp.get(i, 0.0))), 2)
+                      for i in wk.lineup if captain_score(int(info.at[i, "pos"]), 0.0) is not None},
         "notes": [n.replace("re-run with --ft N", "reply /ft N") for n in state.notes],
     }
 

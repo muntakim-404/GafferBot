@@ -3,7 +3,7 @@
 For every remaining gameweek in the current chip window (first half: up to
 GW19, second half: up to GW38) it estimates, from the model's predictions:
 
-  * Triple Captain: the captain's expected points (the extra third);
+  * Triple Captain: the captain's bias-corrected score (the extra third);
   * Bench Boost:    expected points of your 4 bench players;
   * Free Hit:       best one-week squad you could afford, minus your own XI;
 
@@ -22,7 +22,7 @@ from itertools import permutations
 
 import pandas as pd
 
-from .config import DEF, FWD, GK, MID, SolverParams
+from .config import DEF, FWD, GK, MID, SolverParams, captain_score
 from .solver import solve
 
 CHIP_LABEL = {"3xc": "Triple Captain", "bboost": "Bench Boost", "freehit": "Free Hit"}
@@ -81,7 +81,8 @@ def best_xi(squad: list[int], pos: dict, xp: dict) -> tuple[list[int], int, floa
     if best is None:
         raise ValueError("Squad can't field a legal XI.")
     xi = best[1]
-    cap = max(xi, key=lambda p: xp.get(p, 0.0))
+    eligible = [p for p in xi if captain_score(pos[p], 0.0) is not None]   # MID/FWD only
+    cap = max(eligible, key=lambda p: captain_score(pos[p], xp.get(p, 0.0)))
     return xi, cap, best[0] + xp.get(cap, 0.0)
 
 
@@ -99,7 +100,7 @@ def chip_values(xp: pd.DataFrame, players: pd.DataFrame, squads: dict[int, list[
         col = xp[gw].to_dict()
         squad = squads[gw]
         xi, cap, xi_pts = best_xi(squad, pos, col)
-        row = {"gw": gw, "captain": cap, "tc": col.get(cap, 0.0),
+        row = {"gw": gw, "captain": cap, "tc": captain_score(pos[cap], col.get(cap, 0.0)),
                "bb": sum(col.get(p, 0.0) for p in squad if p not in xi), "fh": 0.0, "xi_pts": xi_pts}
         if with_free_hit:
             fh = solve(xp[[gw]], players, None,

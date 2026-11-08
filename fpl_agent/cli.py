@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from .backtest import run_backtest
-from .config import POS_NAME, ModelParams, SolverParams
+from .config import POS_NAME, ModelParams, SolverParams, captain_score
 from .data import (Dataset, FPLAuthError, FPLClient, TeamState, load_archive, load_live, resolve_players,
                    team_state_from_my_team, team_state_public)
 from .predictor import predict, xpts_matrix
@@ -108,6 +108,9 @@ def print_plan(plan: Plan, ds: Dataset, pred: pd.DataFrame, state: TeamState | N
         print(f"  {POS_NAME[info.at[p, 'pos']]:<3} {nm(p) + tag:<22} {club.get(info.at[p, 'team'], ''):<4} "
               f"£{info.at[p, 'price']:>4.1f}m  {xp[(p, first.gw)]:>4.1f}{flag}")
     print("Bench:  " + ", ".join(f"{i + 1}. {nm(p)} ({xp[(p, first.gw)]:.1f})" for i, p in enumerate(first.bench)))
+    cs = {p: captain_score(int(info.at[p, "pos"]), xp[(p, first.gw)]) for p in first.lineup}
+    top = sorted((p for p in cs if cs[p] is not None), key=lambda p: -cs[p])[:3]
+    print("Captain scores (bias-corrected, MID/FWD only): " + ", ".join(f"{nm(p)} {cs[p]:.1f}" for p in top))
     print(f"XI expected points incl. captain: {first.xpts:.1f}")
 
     if len(plan.weeks) > 1:
@@ -225,6 +228,13 @@ def cmd_chips(args) -> None:
         print(f"Consider playing {CHIP_LABEL[o['play_now'][0]]} this week.")
     print("\nValues are expected EXTRA points from playing the chip that week, using the squad your")
     print("transfer plan expects you to own then. Weeks further ahead are less certain; re-run weekly.")
+
+
+def cmd_captain_study(args) -> None:
+    from .captaincy import run_study
+    if len(args.archive) < 2:
+        sys.exit("Give at least two seasons, e.g. --archive data/2024-25 --archive data/2025-26")
+    run_study(args.archive)
 
 
 def cmd_backtest(args) -> None:
@@ -396,6 +406,10 @@ def _main(argv=None) -> None:
     p = sub.add_parser("telegram-setup", help="find your Telegram chat id and send a test message")
     p.add_argument("--token", help="bot token (or env TELEGRAM_BOT_TOKEN)")
     p.set_defaults(func=cmd_telegram_setup)
+
+    p = sub.add_parser("captain-study", help="compare captain rules on past seasons (and refit calibration)")
+    p.add_argument("--archive", action="append", default=[], help="season folder; give two or more")
+    p.set_defaults(func=cmd_captain_study)
 
     p = sub.add_parser("download-archive", help="fetch a past season (vaastav layout) for backtests/tests")
     p.add_argument("--season", default="2025-26")

@@ -147,8 +147,9 @@ What this does and doesn't show:
 
 ## Known limitations (in order of how much they likely cost)
 
-1. **Captaincy**: when two players are predicted within a few tenths of each other, the
-   choice is noise. The model has no notion that most managers captain the same player.
+1. **Captaincy**: improved by the captain study (see "Captaincy"), but when the top two
+   captain scores are within about a point, the choice is still close to a coin flip.
+   The model ignores what other managers do; that's about rank, not points.
 2. **Injury returns are approximate**: games a regular starter missed through injury no
    longer count against him, and "Expected back <date>" news sets the return gameweek.
    With no date, availability ramps up 25% per gameweek (a guess). A player who was
@@ -297,8 +298,37 @@ out, or when there are no more weeks than chips left. Double gameweeks are where
 earn the most, and they show up as clear standouts (tested with a fake extra Man City
 fixture: Triple Captain on Haaland jumped from about +7 to +14).
 
-Not validated against past seasons. Triple Captain inherits the model's weakest call,
-captaincy. Treat it as a guide and re-check every week.
+Not validated against past seasons. Triple Captain uses the same captain rule as below.
+Treat it as a guide and re-check every week.
+
+## Captaincy
+
+**Rule:** only midfielders and forwards can captain, ranked by a *captain score*. That is
+the model's expected points corrected for each position's forecast bias: forwards' high
+forecasts run hottest (8.0 expected becomes 6.8), midfielders' only slightly (8.0 becomes
+7.5). Messages show the top three captain scores. When the top two are within a point,
+they warn "close call".
+
+**Evidence** (`python -m fpl_agent captain-study --archive data/2023-24 --archive data/2024-25 --archive data/2025-26`):
+102 gameweeks, walk-forward, the calibration scored on seasons it wasn't fitted to.
+Average captain points per gameweek (a non-playing captain is replaced by the rule's vice):
+
+| Rule | 2023/24 | 2024/25 | 2025/26 | All | vs old rule |
+|---|---|---|---|---|---|
+| Highest expected points (old rule) | 7.59 | 8.85 | 6.68 | 7.71 | |
+| Highest expected points, MID/FWD only | 7.59 | 8.85 | 7.38 | 7.94 | +0.24 ± 0.16 |
+| **Corrected, MID/FWD only (current)** | 7.82 | 9.68 | 7.29 | **8.26** | **+0.56 ± 0.29** |
+| Most-owned MID/FWD (follow the crowd) | 6.47 | 7.12 | 6.15 | 6.58 | −1.13 ± 0.57 |
+
+- The current rule won in every season, and in all 12 variations of the study's own
+  settings (gain +0.3 to +0.6). That makes it **probably better, not proven**: it's
+  about 2 standard errors, and six rules were tried.
+- Following the crowd's captain cost about 1.1 points a week in expectation. Doing so
+  protects your rank against everyone who owns that player; it doesn't score more.
+- Applying the same correction to transfer decisions made no difference (+0.08 ± 0.43),
+  so it's used for the captain only.
+- Refit after any change to the predictor: the command prints the new
+  `CAPTAIN_CALIBRATION` for `config.py`.
 
 ## Layout
 
@@ -309,6 +339,7 @@ fpl_agent/
   predictor.py  xPts model
   solver.py     multi-week MILP + validator
   chips.py      chip planner (Triple Captain, Bench Boost, Free Hit)
+  captaincy.py  captain study: compare captain rules, refit the calibration
   backtest.py   walk-forward evaluation
   agent.py      scheduled tick: deadline windows, Telegram commands, shadow scoring
   telegram.py   Telegram client (token never printed)
@@ -321,7 +352,6 @@ tests/          solver rules, data layer, predictor, agent
 
 ## Next steps
 
-- Captaincy: the model's weakest call; must be fixed before step 5.
 4. LLM news layer: turn press-conference news into `--out` / `--starter` overrides.
 5. Autonomous fallback with guardrails (free transfers only, injured starters only, no
    chips), only after the shadow log shows the plans are at least as good as yours.

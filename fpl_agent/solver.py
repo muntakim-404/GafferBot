@@ -19,7 +19,7 @@ import pandas as pd
 import pulp
 
 from .config import (GK, LINEUP_MAX, LINEUP_MIN, MAX_FREE_TRANSFERS, MAX_PER_CLUB,
-                     SQUAD_COUNT, SolverParams)
+                     SQUAD_COUNT, SolverParams, captain_score)
 from .data import TeamState
 
 
@@ -158,14 +158,21 @@ def solve(xp: pd.DataFrame, players: pd.DataFrame, state: TeamState | None,
         for p in P:
             prob += lu[p][w] <= sq[p][w]
             prob += cp[p][w] <= lu[p][w]
+            if captain_score(pos[p], 0.0) is None:     # only MID/FWD may captain
+                prob += cp[p][w] == 0
             if p in prm.lock:
                 prob += sq[p][w] == 1
             if p in prm.ban:
                 prob += sq[p][w] == 0
 
+    def cap_val(p, gw) -> float:
+        s = captain_score(pos[p], float(xpv.at[p, gw]))
+        return 0.0 if s is None else s
+
+    # XI and bench at raw xPts; the captain's extra points at the bias-corrected captain score.
     value = pulp.lpSum(
-        weights[w] * pulp.lpSum(float(xpv.at[p, gws[w]]) *
-                                (lu[p][w] + cp[p][w] + prm.bench_weight * (sq[p][w] - lu[p][w])) for p in P)
+        weights[w] * pulp.lpSum(float(xpv.at[p, gws[w]]) * (lu[p][w] + prm.bench_weight * (sq[p][w] - lu[p][w]))
+                                + cap_val(p, gws[w]) * cp[p][w] for p in P)
         for w in range(W))
     cost = pulp.lpSum(weights[w] * (prm.hit_cost + prm.hit_margin) * hits[w] for w in T)
     prob += value - cost + prm.ft_value * ft[W]
@@ -189,7 +196,9 @@ def solve(xp: pd.DataFrame, players: pd.DataFrame, state: TeamState | None,
         squad = [p for p in P if on(sq[p][w])]
         lineup = sorted((p for p in squad if on(lu[p][w])), key=lambda p: -xpv.at[p, gw])
         cap = next(p for p in lineup if on(cp[p][w]))
-        vice = next((p for p in lineup if p != cap), cap)
+        eligible = sorted((p for p in lineup if p != cap and captain_score(pos[p], 0.0) is not None),
+                          key=lambda p: -cap_val(p, gw))
+        vice = eligible[0] if eligible else next((p for p in lineup if p != cap), cap)
         bench_pl = [p for p in squad if p not in lineup]
         bench = sorted(bench_pl, key=lambda p: (pos[p] != GK, -xpv.at[p, gw]))
         if w in T:
@@ -234,6 +243,8 @@ def validate(plan: Plan, players: pd.DataFrame, state: TeamState | None, budget:
                 errs.append(f"{tag}: formation breaks limits for position {k}")
         if wk.captain not in lu or wk.vice not in lu:
             errs.append(f"{tag}: captain/vice not in lineup")
+        if captain_score(int(info.at[wk.captain, "pos"]), 0.0) is None:
+            errs.append(f"{tag}: captain must be a midfielder or forward")
         if set(wk.bench) != sq - lu or (wk.bench and info.at[wk.bench[0], "pos"] != GK):
             errs.append(f"{tag}: bench invalid")
         if prev is None:   # from-scratch first week

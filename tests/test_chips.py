@@ -46,10 +46,20 @@ def test_best_xi_is_legal_and_picks_best_formation():
     squad, pos = _squad()
     xp = {p: 1.0 for p in squad}
     xp.update({3: 9, 4: 8, 5: 7, 6: 6, 7: 5})        # all five defenders are strong -> 5 at the back
+    xp.update({8: 4.0})                               # best midfielder
     xi, cap, pts = best_xi(squad, pos, xp)
     c = {k: sum(pos[p] == k for p in xi) for k in (GK, DEF, MID, FWD)}
     assert len(xi) == 11 and c[GK] == 1 and c[DEF] == 5 and c[MID] >= 2 and c[FWD] >= 1
-    assert cap == 3 and pts == pytest.approx(sum(xp[p] for p in xi) + 9)
+    # defenders can't captain: the best midfielder/forward gets the armband
+    assert cap == 8 and pts == pytest.approx(sum(xp[p] for p in xi) + 4.0)
+
+
+def test_captain_prefers_midfielder_when_forward_is_only_slightly_higher():
+    squad, pos = _squad()
+    xp = {p: 1.0 for p in squad}
+    xp.update({8: 7.6, 13: 8.0})                      # MID 7.6 vs FWD 8.0: forwards' forecasts run hot
+    _, cap, _ = best_xi(squad, pos, xp)
+    assert cap == 8                                   # 7.10 corrected vs 6.79
 
 
 def test_assign_chips_one_per_week_and_respects_last_week():
@@ -84,7 +94,7 @@ def test_no_standout_means_hold():
 def test_standout_later_week_is_named_but_not_played_now():
     o, star = _outlook(12)
     d = o["detail"]["3xc"]
-    assert d["gw"] == 12 and d["standout"] and d["margin"] == pytest.approx(6.0)
+    assert d["gw"] == 12 and d["standout"] and d["margin"] == pytest.approx(0.763 * (12.0 - 6.0), abs=0.01)
     assert o["play_now"] == []
 
 

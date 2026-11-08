@@ -120,6 +120,21 @@ def test_three_per_club_even_when_one_club_dominates():
     assert validate(plan, pl, None) == []
 
 
+def test_captain_is_never_a_defender_or_keeper():
+    pl = make_players()
+    xp = make_xp(pl, [1, 2])
+    defs = pl[pl.pos == 2]["id"].head(3)
+    xp.loc[defs] = 20.0                       # defenders with absurd predictions
+    plan = solve(xp, pl, None, SolverParams(time_limit=60))
+    info = pl.set_index("id")
+    for wk in plan.weeks:
+        assert info.at[wk.captain, "pos"] in (3, 4) and info.at[wk.vice, "pos"] in (3, 4)
+        assert any(d in wk.lineup for d in defs)          # ...but they still start
+    assert validate(plan, pl, None) == []
+    plan.weeks[0].captain = int(next(d for d in defs if d in plan.weeks[0].lineup))
+    assert any("captain must be" in e for e in validate(plan, pl, None))
+
+
 def test_validate_catches_a_broken_plan():
     pl = make_players()
     plan = solve(make_xp(pl, [1]), pl, None, SolverParams(time_limit=60))
