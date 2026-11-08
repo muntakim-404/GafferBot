@@ -1,6 +1,9 @@
 {
-  "telegram_offset": 795874826,
-  "ft": null,
+  "telegram_offset": 795874828,
+  "ft": {
+    "gw": 11,
+    "value": 2
+  },
   "sent": {
     "10": [
       "final"
