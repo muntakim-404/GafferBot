@@ -2,7 +2,7 @@
 
 Predicts expected points (xPts) for every Premier League player over the next few
 gameweeks, then solves for the best transfers, starting XI and captain under all FPL
-rules. Step 3 runs it on GitHub every hour and sends you the plan on Telegram before
+rules. Step 3 runs it on GitHub on a schedule and sends you the plan on Telegram before
 each deadline (see "Step 3" below). It only reads from FPL and never changes your team.
 
 ## Install
@@ -45,7 +45,7 @@ Your team id is the number in the URL of your Points page
 
 ```bash
 # Recommended transfers/XI/captain for the next gameweek, planned over 5 weeks
-python -m fpl_agent plan --team-id 4391754
+python -m fpl_agent plan --team-id 1234567
 
 # Common options
 python -m fpl_agent plan --team-id 1234567 --ft 2            # override free-transfer count
@@ -181,14 +181,17 @@ files the tool needs from the vaastav repository into `data/2025-26/`.
 
 ## Step 3: automatic plans on Telegram (GitHub Actions)
 
-GitHub starts a run every hour. Most runs end within a minute. When a deadline is
-**≤ 6.5 hours** away it sends an *early look*, and at **≤ 2 hours** a *final check*
-(each once). After every gameweek it scores what its plan would have got against
-what you actually got, and keeps the running total in `logs/shadow.csv`. That record
-is how you decide whether to trust it with automatic transfers (step 5). It only
-reads from FPL and never changes your team.
+GitHub is asked to start a run every 30 minutes. Most runs end within a minute. The
+first run within **24 hours** of a deadline sends an *early look*, and the first within
+**4 hours** a *final check* (each once). The windows are wide on purpose: in practice
+GitHub can leave several hours between scheduled runs (see "Reliable timing").
+Change them with the repository variables `FPL_EARLY_HOURS` / `FPL_FINAL_HOURS`.
+After every gameweek it scores what its plan would have got against what you actually
+got, and keeps the running total in `logs/shadow.csv`. That record is how you decide
+whether to trust it with automatic transfers (step 5). It only reads from FPL and never
+changes your team.
 
-Reply to the bot (picked up at the next hourly run, so up to an hour later):
+Reply to the bot (picked up at its next run, usually within an hour):
 `/ft N` sets your free transfers for the coming gameweek · `/plan` sends a plan at the
 next run · `/status` · `/help`.
 
@@ -198,17 +201,17 @@ next run · `/status` · `/help`.
 2. Open your new bot and send it any message (e.g. `hi`).
 3. On your PC:
    ```powershell
-   $env:TELEGRAM_BOT_TOKEN=""
+   $env:TELEGRAM_BOT_TOKEN="<your token>"
    python -m fpl_agent telegram-setup
    ```
    It prints your **chat id** and sends a test message to Telegram.
 
 ### 2. Try it on your PC first
 ```powershell
-$env:FPL_TEAM_ID="4391754"
+$env:FPL_TEAM_ID="<your team id>"
 $env:FPL_TIMEZONE="Asia/Dhaka"
 python -m fpl_agent tick --dry-run --force     # prints the message instead of sending
-$env:TELEGRAM_CHAT_ID=""
+$env:TELEGRAM_CHAT_ID="<chat id>"
 python -m fpl_agent tick --force               # really sends it
 ```
 
@@ -237,13 +240,65 @@ If it fails, click the run to read the log:
 - *Permission denied* when pushing: **Settings → Actions → General → Workflow
   permissions → Read and write permissions**.
 
+### Reliable timing (recommended, free, ~10 minutes)
+GitHub treats scheduled runs as best-effort. On this project's first week, gaps of 4–8
+hours between runs were observed. A free outside timer that *asks* GitHub to run the
+workflow fixes that, because requested runs start right away.
+
+1. **GitHub token:** github.com → your profile picture → **Settings → Developer settings
+   → Personal access tokens → Fine-grained tokens → Generate new token**.
+   - Repository access: **Only select repositories** → your bot's repository.
+   - Permissions → Repository permissions → **Actions: Read and write**. Nothing else.
+   - Copy the token (it starts with `github_pat_`). It can only start/stop this
+     repository's workflow runs; it can't read your secrets or change your code.
+2. **cron-job.org:** create a free account → **Create cronjob**:
+   - URL: `https://api.github.com/repos/<your-username>/<your-repo>/actions/workflows/fpl-agent.yml/dispatches`
+   - Schedule: every hour (e.g. at minute 20).
+   - Advanced → Request method **POST**; headers
+     `Authorization: Bearer <your github_pat token>`,
+     `Accept: application/vnd.github+json`, `X-GitHub-Api-Version: 2022-11-28`;
+     request body `{"ref":"main"}`.
+   - Save, then **Test run**: a new run should appear in your Actions tab within
+     seconds (GitHub answers `204`).
+3. Keep the GitHub schedule as a backup. Duplicate runs are harmless: the bot never sends
+   the same message twice.
+
 ### Day to day
-- **No message 5 hours before a deadline?** Check the Actions tab. GitHub's scheduled
-  runs can be late or occasionally skipped, which is why there are two messages.
+- **No early message by 18 hours before a deadline, or no final by 3 hours?** Check the
+  Actions tab, and set up "Reliable timing" above if you haven't.
 - **Changing the code later:** the bot commits its logs to GitHub, so in GitHub Desktop
   click **Fetch/Pull origin first**, then copy in new files, **Commit**, **Push origin**.
 - Scheduled jobs in public repos stop after 60 days without commits. The bot's own
   log commits each gameweek should keep it running.
+
+## Chips: when to play Triple Captain, Bench Boost and Free Hit
+
+Each plan message has a **Chips** section, and on your PC:
+
+```powershell
+python -m fpl_agent chips --team-id <your id>
+```
+
+prints, for every gameweek left in the current half (first half: up to GW19), the
+expected *extra* points from each chip:
+- **Triple Captain:** your captain's expected points.
+- **Bench Boost:** your bench's expected points.
+- **Free Hit:** the best one-week squad you could afford, minus your own XI.
+
+It uses the squad your transfer plan expects you to own that week, reads which chips
+you've already used from FPL, and gives each remaining chip its own week (FPL allows
+one chip per gameweek).
+
+**A week only "stands out" if it beats the next best by a clear margin** (Triple Captain
+1.5 points; Bench Boost and Free Hit 2). Otherwise it says *hold*. Week-to-week
+differences are usually smaller than the model's error, and waiting keeps the option of
+a double gameweek or better news. It only says *play this week* when this week stands
+out, or when there are no more weeks than chips left. Double gameweeks are where chips
+earn the most, and they show up as clear standouts (tested with a fake extra Man City
+fixture: Triple Captain on Haaland jumped from about +7 to +14).
+
+Not validated against past seasons. Triple Captain inherits the model's weakest call,
+captaincy. Treat it as a guide and re-check every week.
 
 ## Layout
 
@@ -253,11 +308,12 @@ fpl_agent/
   data.py       API client, archive loader, team state, selling prices
   predictor.py  xPts model
   solver.py     multi-week MILP + validator
+  chips.py      chip planner (Triple Captain, Bench Boost, Free Hit)
   backtest.py   walk-forward evaluation
-  agent.py      hourly tick: deadline windows, Telegram commands, shadow scoring
+  agent.py      scheduled tick: deadline windows, Telegram commands, shadow scoring
   telegram.py   Telegram client (token never printed)
   cli.py        `python -m fpl_agent ...`
-.github/workflows/fpl-agent.yml   the hourly GitHub Actions job
+.github/workflows/fpl-agent.yml   the scheduled GitHub Actions job
 logs/           plans sent and the shadow log (written by the bot)
 state/          the bot's memory between runs (written by the bot)
 tests/          solver rules, data layer, predictor, agent
@@ -265,6 +321,7 @@ tests/          solver rules, data layer, predictor, agent
 
 ## Next steps
 
+- Captaincy: the model's weakest call; must be fixed before step 5.
 4. LLM news layer: turn press-conference news into `--out` / `--starter` overrides.
 5. Autonomous fallback with guardrails (free transfers only, injured starters only, no
    chips), only after the shadow log shows the plans are at least as good as yours.

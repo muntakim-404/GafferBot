@@ -181,6 +181,52 @@ def cmd_predict(args) -> None:
         print(f"\nSaved all predictions to {args.csv}")
 
 
+def cmd_chips(args) -> None:
+    from .chips import CHIP_LABEL, chip_outlook, remaining_chips
+    ds, client = _load_dataset(args)
+    if ds.next_gw is None:
+        sys.exit("No upcoming gameweek: the season is over.")
+    state = _load_state(args, ds, client)
+    if state is None:
+        sys.exit("The chip planner needs your squad: use --team-id (or --squad-file / --template).")
+    used, boot = [], None
+    if client is not None and args.team_id:
+        used = client.entry_history(args.team_id).get("chips", [])
+        boot = client.bootstrap().get("chips")
+    chips = remaining_chips(ds.next_gw, used, boot)
+    if not chips:
+        print("No Triple Captain, Bench Boost or Free Hit left in this half of the season.")
+        return
+    last = max(chips.values())
+    plan_gws = list(range(ds.next_gw, min(ds.next_gw + args.horizon, last + 1, 39)))
+    pred = predict(ds, list(range(ds.next_gw, last + 1)), ModelParams())
+    xp = xpts_matrix(pred)
+    plan = solve(xp[plan_gws], ds.players, state, SolverParams(time_limit=args.time_limit))
+    info = ds.players.set_index("id")
+    budget = sum(state.selling_price.get(p, info.at[p, "price"]) for p in state.squad) + state.bank
+    print(f"Chips left: {', '.join(CHIP_LABEL[c] for c in chips)} (use by GW{last}). "
+          f"Free Hit budget £{budget:.1f}m. Solving one Free Hit squad per week...")
+    o = chip_outlook(xp, ds.players, {w.gw: w.squad for w in plan.weeks}, budget, ds.next_gw, chips,
+                     with_free_hit=not args.no_free_hit)
+    v = o["values"]
+    print(f"\n{'GW':<4}{'captain':<16}{'Triple C':>9}{'Bench B':>9}{'Free Hit':>9}   your XI incl. captain")
+    for gw, r in v.iterrows():
+        mark = " ".join(f"<- {CHIP_LABEL[c]}" for c, g in o["best"].items() if g == gw)
+        print(f"{gw:<4}{info.at[int(r.captain), 'web_name']:<16}{r.tc:>9.1f}{r.bb:>9.1f}"
+              f"{(r.fh if 'freehit' in chips and not args.no_free_hit else float('nan')):>9.1f}   {r.xi_pts:>5.1f}  {mark}")
+    print()
+    for c, d in o["detail"].items():
+        if c == "freehit" and args.no_free_hit:
+            continue
+        verdict = (f"GW{d['gw']} stands out (+{d['margin']:.1f} over the next best week)" if d["standout"]
+                   else f"hold: no week stands out (best GW{d['gw']} is only +{d['margin']:.1f} over the next)")
+        print(f"{CHIP_LABEL[c]:<15} {verdict}")
+    if o["play_now"]:
+        print(f"Consider playing {CHIP_LABEL[o['play_now'][0]]} this week.")
+    print("\nValues are expected EXTRA points from playing the chip that week, using the squad your")
+    print("transfer plan expects you to own then. Weeks further ahead are less certain; re-run weekly.")
+
+
 def cmd_backtest(args) -> None:
     ds = load_archive(args.archive)
     summary, preds = run_backtest(ds, start_gw=args.start_gw, end_gw=args.end_gw, verbose=True)
@@ -224,6 +270,13 @@ def cmd_tick(args) -> None:
     if args.dry_run:
         root = root / ".dryrun"   # keep test runs out of the real logs and state
     cfg = AgentConfig(int(str(team).strip()), tz, args.horizon, root)
+    for attr, env in (("early_hours", "FPL_EARLY_HOURS"), ("final_hours", "FPL_FINAL_HOURS")):
+        val = os.environ.get(env, "").strip()
+        if val:
+            try:
+                setattr(cfg, attr, float(val))
+            except ValueError:
+                sys.exit(f"{env} must be a number of hours, got '{val}'.")
     if not args.dry_run:
         missing = [v for v in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID") if not os.environ.get(v)]
         if missing:
@@ -311,6 +364,16 @@ def _main(argv=None) -> None:
     p.add_argument("--top", type=int, default=10)
     p.add_argument("--csv", help="save all predictions to CSV")
     p.set_defaults(func=cmd_predict)
+
+    p = sub.add_parser("chips", help="best weeks for Triple Captain, Bench Boost and Free Hit")
+    data_args(p)
+    p.add_argument("--team-id", type=int, help="your FPL team id (reads which chips you've used)")
+    p.add_argument("--squad-file", help="JSON squad file (offline use; assumes no chips used)")
+    p.add_argument("--template", action="store_true", help="use the most-owned squad (testing)")
+    p.add_argument("--ft", type=int, help="override free transfers available")
+    p.add_argument("--no-free-hit", action="store_true", help="skip the (slower) Free Hit estimate")
+    p.add_argument("--time-limit", type=float, default=120.0)
+    p.set_defaults(func=cmd_chips, from_scratch=False)
 
     p = sub.add_parser("backtest", help="walk-forward backtest on an archived season")
     p.add_argument("--archive", required=True)

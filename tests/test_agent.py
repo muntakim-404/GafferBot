@@ -116,15 +116,15 @@ def deadline(client, gw):
 @needs_2026
 def test_early_and_final_once_each(tmp_path):
     client, tg = make_client(), FakeTelegram()
-    cfg = AgentConfig(team_id=1, tz="Asia/Dhaka", horizon=2, root=tmp_path)
+    cfg = AgentConfig(team_id=1, tz="Asia/Dhaka", horizon=2, root=tmp_path, chips=False)
     d = deadline(client, 7)
-    assert tick(cfg, client, tg, d - pd.Timedelta(hours=10)) == 0 and tg.sent == []
-    tick(cfg, client, tg, d - pd.Timedelta(hours=5))
+    assert tick(cfg, client, tg, d - pd.Timedelta(hours=30)) == 0 and tg.sent == []
+    tick(cfg, client, tg, d - pd.Timedelta(hours=20))
     assert len(tg.sent) == 1 and "GW7" in tg.sent[0] and "early look" in tg.sent[0]
     assert "Asia/Dhaka" in tg.sent[0] and "assumed" in tg.sent[0]
-    tick(cfg, client, tg, d - pd.Timedelta(hours=4))            # no duplicate
+    tick(cfg, client, tg, d - pd.Timedelta(hours=6))            # no duplicate
     assert len(tg.sent) == 1
-    tick(cfg, client, tg, d - pd.Timedelta(hours=1))
+    tick(cfg, client, tg, d - pd.Timedelta(hours=3, minutes=50))
     assert len(tg.sent) == 2 and "final check" in tg.sent[1]
     tick(cfg, client, tg, d - pd.Timedelta(minutes=20))
     assert len(tg.sent) == 2
@@ -137,7 +137,7 @@ def test_early_and_final_once_each(tmp_path):
 def test_commands_and_ignoring_strangers(tmp_path):
     client = make_client()
     tg = FakeTelegram([msg(1, "/ft 3"), msg(2, "/ft 5", chat=999), msg(3, "/plan")])
-    cfg = AgentConfig(team_id=1, horizon=2, root=tmp_path)
+    cfg = AgentConfig(team_id=1, horizon=2, root=tmp_path, chips=False)
     tick(cfg, client, tg, deadline(client, 7) - pd.Timedelta(hours=30))
     st = load_state(cfg)
     assert st["ft"] == {"gw": 7, "value": 3} and st["telegram_offset"] == 3
@@ -151,19 +151,21 @@ def test_commands_and_ignoring_strangers(tmp_path):
 @needs_2026
 def test_failure_is_reported_once_and_retried(tmp_path):
     client, tg = make_client(fail=True), FakeTelegram()
-    cfg = AgentConfig(team_id=1, horizon=2, root=tmp_path)
+    cfg = AgentConfig(team_id=1, horizon=2, root=tmp_path, chips=False)
     d = deadline(client, 7)
-    assert tick(cfg, client, tg, d - pd.Timedelta(hours=5)) == 1
+    assert tick(cfg, client, tg, d - pd.Timedelta(hours=10)) == 1
     assert len(tg.sent) == 1 and "Couldn't build" in tg.sent[0]
-    assert tick(cfg, client, tg, d - pd.Timedelta(hours=4)) == 1
-    assert len(tg.sent) == 1                                   # no spam
+    assert tick(cfg, client, tg, d - pd.Timedelta(hours=8)) == 1
+    assert len(tg.sent) == 1                                   # no spam within the early window
     assert load_state(cfg)["sent"].get("7", []) == []          # still due, so it keeps retrying
+    assert tick(cfg, client, tg, d - pd.Timedelta(hours=3)) == 1
+    assert len(tg.sent) == 2 and "final" in tg.sent[1]         # the final attempt gets one alert of its own
 
 
 @needs_2026
 def test_shadow_scoring_of_a_finished_gameweek(tmp_path):
     client, tg = make_client(), FakeTelegram()
-    cfg = AgentConfig(team_id=1, horizon=2, root=tmp_path)
+    cfg = AgentConfig(team_id=1, horizon=2, root=tmp_path, chips=False)
     raw = client.raw[client.raw["GW"] == 6]
     agg = raw.groupby(["element", "position"], as_index=False)[["total_points", "minutes"]].sum()
     played = agg[agg["minutes"] > 0].sort_values("total_points", ascending=False)

@@ -23,13 +23,17 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from .chips import chip_outlook, format_chips, remaining_chips
 from .config import DEF, FWD, GK, MID, POS_NAME, ModelParams, SolverParams
 from .data import load_live, team_state_public
 from .predictor import predict, xpts_matrix
 from .solver import solve, validate
 
-EARLY_HOURS = 6.5
-FINAL_HOURS = 2.0
+# GitHub's "hourly" schedule can in practice run every 4-8 hours, so the windows
+# are wide enough that at least one run lands in each: the early plan is sent by
+# the first run within 24h of the deadline, the final by the first within 4h.
+EARLY_HOURS = 24.0
+FINAL_HOURS = 4.0
 CLOSE_CAPTAIN = 1.0      # captain options closer than this are within the model's error
 CHIP_NAMES = {"bboost": "Bench Boost", "3xc": "Triple Captain", "freehit": "Free Hit", "wildcard": "Wildcard"}
 SHADOW_COLS = ["gw", "window", "bot_points", "your_points", "diff", "bot_captain", "your_captain",
@@ -42,6 +46,9 @@ class AgentConfig:
     tz: str = "UTC"
     horizon: int = 5
     root: Path = Path(".")
+    early_hours: float = EARLY_HOURS
+    final_hours: float = FINAL_HOURS
+    chips: bool = True
 
     @property
     def state_file(self) -> Path: return self.root / "state" / "agent_state.json"
@@ -118,6 +125,8 @@ def format_plan(p: dict, tz: str, now: pd.Timestamp) -> str:
     if p["injuries"]:
         lines += ["", "<b>Injury news in your squad</b>"]
         lines += [f"• {_e(n)}: {_e(news)}" for n, news in p["injuries"]]
+    if p.get("chip_lines"):
+        lines += [""] + p["chip_lines"]
     if p["later"]:
         lines += ["", "Next weeks: " + " · ".join(_e(s) for s in p["later"])]
     if p["notes"]:
@@ -126,7 +135,7 @@ def format_plan(p: dict, tz: str, now: pd.Timestamp) -> str:
     return "\n".join(lines)
 
 
-HELP = ("<b>Commands</b> (read at the next hourly run, so replies can take up to an hour)\n"
+HELP = ("<b>Commands</b> (read at the bot's next run: usually within an hour, sometimes a few)\n"
         "/ft N: set your free transfers for the coming gameweek (0–5)\n"
         "/plan: send a plan at the next run, whatever the time\n"
         "/status: next deadline, settings, season comparison\n"
@@ -141,14 +150,34 @@ def build_plan(cfg: AgentConfig, client, ft_override: int | None, window: str, n
     state = team_state_public(client, cfg.team_id, ds, ft_override)
     if ft_override is not None:
         state.notes.insert(0, f"Free transfers set to {ft_override} by your /ft command.")
-    gws = list(range(ds.next_gw, min(ds.next_gw + cfg.horizon, 39)))
-    pred = predict(ds, gws, ModelParams())
-    plan = solve(xpts_matrix(pred), ds.players, state, SolverParams())
+
+    chips_left = {}
+    if cfg.chips:
+        try:
+            used = client.entry_history(cfg.team_id).get("chips", [])
+            chips_left = remaining_chips(ds.next_gw, used, client.bootstrap().get("chips"))
+        except Exception as e:   # never let the chip outlook block the transfer plan
+            print(f"chip lookup failed: {e}")
+    plan_gws = list(range(ds.next_gw, min(ds.next_gw + cfg.horizon, 39)))
+    last = max([plan_gws[-1]] + list(chips_left.values()))
+    pred = predict(ds, list(range(ds.next_gw, min(last, 38) + 1)), ModelParams())
+    xp_all = xpts_matrix(pred)
+    plan = solve(xp_all[plan_gws], ds.players, state, SolverParams())
     problems = validate(plan, ds.players, state)
     if problems:
         raise RuntimeError("Plan failed validation: " + "; ".join(problems))
 
     info = ds.players.set_index("id")
+    chip_lines = []
+    if chips_left:
+        try:
+            budget = sum(state.selling_price.get(p, info.at[p, "price"]) for p in state.squad) + state.bank
+            outlook = chip_outlook(xp_all, ds.players, {w.gw: w.squad for w in plan.weeks}, budget,
+                                   ds.next_gw, chips_left)
+            chip_lines = format_chips(outlook, info["web_name"].to_dict(), _e)
+        except Exception as e:
+            print(traceback.format_exc())
+            chip_lines = [f"<i>Chip outlook unavailable this time ({_e(type(e).__name__)}).</i>"]
     wk = plan.weeks[0]
     gw = wk.gw
     xp = pred[pred["gw"] == gw].set_index("id")["xpts"]
@@ -176,7 +205,7 @@ def build_plan(cfg: AgentConfig, client, ft_override: int | None, window: str, n
         "names": {str(i): info.at[i, "web_name"] for i in ids},
         "price": {str(i): float(info.at[i, "price"]) for i in ids},
         "sell": {str(i): float(state.selling_price.get(i, info.at[i, "price"])) for i in ids},
-        "injuries": injuries, "later": later,
+        "injuries": injuries, "later": later, "chip_lines": chip_lines,
         "notes": [n.replace("re-run with --ft N", "reply /ft N") for n in state.notes],
     }
 
@@ -366,9 +395,9 @@ def tick(cfg: AgentConfig, client, tg, now: pd.Timestamp | None = None, force: b
         hours = (deadline - now).total_seconds() / 3600
         sent = st["sent"].setdefault(str(next_gw), [])
         window = None
-        if 0 < hours <= FINAL_HOURS and "final" not in sent:
+        if 0 < hours <= cfg.final_hours and "final" not in sent:
             window = "final"
-        elif 0 < hours <= EARLY_HOURS and not sent:
+        elif 0 < hours <= cfg.early_hours and not sent:
             window = "early"
         if window is None and plan_now:
             window = "manual"

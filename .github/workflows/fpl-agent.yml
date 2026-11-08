@@ -1,12 +1,16 @@
-# Runs the FPL agent every hour. Most runs end within a minute because no
-# deadline is close. About 6h and again about 2h before a deadline it builds a
-# plan and sends it to your Telegram. It only READS from FPL: it never changes
-# your team.
+# Runs the FPL agent every 30 minutes. Most runs end within a minute because
+# no deadline is close. Within 24h of a deadline it sends an early plan, and
+# within 4h a final one, to your Telegram. It only READS from FPL: it never
+# changes your team.
+#
+# GitHub treats this schedule as a wish, not a promise: in practice runs can be
+# hours apart. For reliable timing, also set up the free external trigger
+# described in the README ("Reliable timing").
 name: fpl-agent
 
 on:
   schedule:
-    - cron: "17 * * * *"        # every hour at :17 (GitHub is busiest on the hour)
+    - cron: "7,37 * * * *"      # every 30 min, off the busy top of the hour
   workflow_dispatch:            # adds a "Run workflow" button in the Actions tab
     inputs:
       force:
@@ -42,6 +46,8 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           FPL_TEAM_ID: ${{ secrets.FPL_TEAM_ID }}
           FPL_TIMEZONE: ${{ vars.FPL_TIMEZONE }}
+          FPL_EARLY_HOURS: ${{ vars.FPL_EARLY_HOURS }}
+          FPL_FINAL_HOURS: ${{ vars.FPL_FINAL_HOURS }}
         run: python -m fpl_agent tick ${{ inputs.force && '--force' || '' }}
 
       - name: Save logs and state
