@@ -16,11 +16,11 @@
   "errors": [],
   "last_deadline_utc": "2026-11-21T11:00:00+00:00",
   "score_fails": {},
-  "fail_streak": 3,
+  "fail_streak": 4,
   "last_error": {
-    "at": "2026-11-13T22:00:47.685440+00:00",
+    "at": "2026-11-13T22:30:43.236439+00:00",
     "stage": "reading your Telegram messages",
-    "error": "TelegramError: Telegram getUpdates error 502: Bad Gateway",
-    "streak": 3
+    "error": "TelegramError: Telegram getUpdates failed: ReadTimeout: HTTPSConnectionPool(host='api.telegram.org', port=443): Read timed out. (read timeout=20.0)",
+    "streak": 4
   }
 }
