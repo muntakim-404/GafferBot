@@ -15,5 +15,12 @@
   ],
   "errors": [],
   "last_deadline_utc": "2026-11-21T11:00:00+00:00",
-  "score_fails": {}
+  "score_fails": {},
+  "fail_streak": 1,
+  "last_error": {
+    "at": "2026-11-13T21:23:31.676793+00:00",
+    "stage": "reading your Telegram messages",
+    "error": "TelegramError: Telegram getUpdates error 502: Bad Gateway",
+    "streak": 1
+  }
 }
