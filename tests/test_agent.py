@@ -41,20 +41,102 @@ def test_telegram_errors_never_contain_the_token(monkeypatch):
         raise requests.ConnectionError(f"Max retries exceeded with url: {url}")
     monkeypatch.setattr(requests, "post", boom)
     with pytest.raises(TelegramError) as e:
-        Telegram(token, "42").send("hi")
-    assert token not in str(e.value) and "<token>" in str(e.value)
+        Telegram(token, "42", backoff=0).send("hi")
+    assert token not in str(e.value) and "<token>" in str(e.value) and not e.value.permanent
 
 
-def test_unreachable_fpl_alerts_once_a_day(tmp_path):
-    class Down:
+class FakeResponse:
+    def __init__(self, status, js=None):
+        self.status_code, self._js = status, js
+
+    def json(self):
+        if self._js is None:
+            raise ValueError("not JSON")          # e.g. an HTML 502 page
+        return self._js
+
+
+def test_telegram_retries_blips_then_succeeds(monkeypatch):
+    seq = [requests.ConnectionError("reset"), FakeResponse(502), FakeResponse(200, {"ok": True, "result": [1]})]
+    calls = []
+
+    def post(url, **kw):
+        calls.append(url)
+        r = seq[len(calls) - 1]
+        if isinstance(r, Exception):
+            raise r
+        return r
+    monkeypatch.setattr(requests, "post", post)
+    assert Telegram("1:x", "42", backoff=0).updates(0) == [1] and len(calls) == 3
+
+
+def test_telegram_wrong_token_fails_at_once_as_permanent(monkeypatch):
+    calls = []
+
+    def post(url, **kw):
+        calls.append(url)
+        return FakeResponse(401, {"ok": False, "error_code": 401, "description": "Unauthorized"})
+    monkeypatch.setattr(requests, "post", post)
+    with pytest.raises(TelegramError) as e:
+        Telegram("1:x", "42", backoff=0).updates(0)
+    assert e.value.permanent and len(calls) == 1
+
+
+class Down:
+    def bootstrap(self, max_age=None):
+        raise RuntimeError("FPL API kept failing for bootstrap-static")
+
+
+def test_fpl_blips_are_quiet_until_three_in_a_row(tmp_path):
+    tg, cfg = FakeTelegram(), AgentConfig(team_id=1, root=tmp_path)
+    t = pd.Timestamp("2026-11-13 10:00", tz="UTC")
+    step = pd.Timedelta(minutes=30)
+    assert [tick(cfg, Down(), tg, t + k * step) for k in range(3)] == [0, 0, 1]
+    assert len(tg.sent) == 1 and "failed 3 runs in a row" in tg.sent[0]
+    st = load_state(cfg)
+    assert st["fail_streak"] == 3 and "gameweek list" in st["last_error"]["stage"]
+    codes = [tick(cfg, Down(), tg, t + k * step) for k in range(3, 24)]
+    assert codes == [0] * 20 + [1] and len(tg.sent) == 2         # reminder at 24 failed runs
+
+
+def test_recovery_resets_the_streak(tmp_path):
+    tg, cfg = FakeTelegram(), AgentConfig(team_id=1, root=tmp_path)
+    t = pd.Timestamp("2026-11-13 10:00", tz="UTC")
+    tick(cfg, Down(), tg, t)
+    tick(cfg, Down(), tg, t + pd.Timedelta(minutes=30))
+
+    class Up:
         def bootstrap(self, max_age=None):
-            raise RuntimeError("FPL API kept failing for bootstrap-static")
-    tg = FakeTelegram()
+            return {"events": [{"id": 12, "deadline_time": "2026-12-01T11:00:00Z", "finished": False,
+                                "is_next": True, "is_current": False}]}
+    assert tick(cfg, Up(), tg, t + pd.Timedelta(hours=1)) == 0
+    assert load_state(cfg)["fail_streak"] == 0 and tg.sent == []
+
+
+def test_no_alerts_while_fpl_updates_after_a_deadline(tmp_path):
+    tg, cfg = FakeTelegram(), AgentConfig(team_id=1, root=tmp_path)
+    dl = pd.Timestamp("2026-11-21 11:00", tz="UTC")
+    cfg.state_file.parent.mkdir(parents=True)
+    cfg.state_file.write_text(json.dumps({"last_deadline_utc": dl.isoformat()}), encoding="utf-8")
+    codes = [tick(cfg, Down(), tg, dl + pd.Timedelta(minutes=30 * k)) for k in range(1, 7)]
+    assert codes == [0] * 6 and tg.sent == []                    # 3 hours of expected downtime: quiet
+
+
+def test_wrong_telegram_token_alerts_immediately(tmp_path):
+    class Rejected:
+        chat_id = "42"
+
+        def updates(self, offset):
+            raise TelegramError("Telegram getUpdates error 401: Unauthorized", permanent=True)
+
+        def send(self, text, chat_id=None):
+            raise AssertionError("should not try to send through a rejected bot")
+
+    class Up:
+        def bootstrap(self, max_age=None):
+            return {"events": [{"id": 12, "deadline_time": "2026-12-01T11:00:00Z", "finished": False,
+                                "is_next": True, "is_current": False}]}
     cfg = AgentConfig(team_id=1, root=tmp_path)
-    t = pd.Timestamp("2026-11-06 10:17", tz="UTC")
-    assert tick(cfg, Down(), tg, t) == 1 and len(tg.sent) == 1 and "Can't reach FPL" in tg.sent[0]
-    assert tick(cfg, Down(), tg, t + pd.Timedelta(hours=1)) == 1 and len(tg.sent) == 1
-    assert tick(cfg, Down(), tg, t + pd.Timedelta(days=1)) == 1 and len(tg.sent) == 2
+    assert tick(cfg, Up(), Rejected(), pd.Timestamp("2026-11-13 10:00", tz="UTC")) == 1
 
 
 def test_split_message():
@@ -86,12 +168,17 @@ def make_client(fail=False):
     from fpl_agent.solver import most_owned_squad
 
     class AgentFake(FakeClient):
+        fail_summaries = fail
+        fail_live = False
+
         def element_summary(self, pid, max_age=None):
-            if fail:
+            if self.fail_summaries:
                 raise RuntimeError("FPL is down")
             return super().element_summary(pid, max_age)
 
         def live(self, gw, max_age=None):
+            if self.fail_live:
+                raise RuntimeError("live endpoint down")
             g = self.raw[self.raw["GW"] == gw].groupby("element")[["total_points", "minutes"]].sum()
             return {"elements": [{"id": int(i), "stats": {"total_points": int(r.total_points),
                                                           "minutes": int(r.minutes)}} for i, r in g.iterrows()]}
@@ -149,17 +236,36 @@ def test_commands_and_ignoring_strangers(tmp_path):
 
 
 @needs_2026
-def test_failure_is_reported_once_and_retried(tmp_path):
+def test_plan_failure_retries_quietly_then_alerts_then_recovers(tmp_path):
     client, tg = make_client(fail=True), FakeTelegram()
     cfg = AgentConfig(team_id=1, horizon=2, root=tmp_path, chips=False)
     d = deadline(client, 7)
-    assert tick(cfg, client, tg, d - pd.Timedelta(hours=10)) == 1
-    assert len(tg.sent) == 1 and "Couldn't build" in tg.sent[0]
-    assert tick(cfg, client, tg, d - pd.Timedelta(hours=8)) == 1
-    assert len(tg.sent) == 1                                   # no spam within the early window
+    times = [d - pd.Timedelta(hours=h) for h in (10, 9.5, 9, 8.5)]
+    assert [tick(cfg, client, tg, t) for t in times] == [0, 0, 1, 0]
+    assert len(tg.sent) == 1 and "failed 3 runs in a row" in tg.sent[0] and "GW7 early plan" in tg.sent[0]
     assert load_state(cfg)["sent"].get("7", []) == []          # still due, so it keeps retrying
-    assert tick(cfg, client, tg, d - pd.Timedelta(hours=3)) == 1
-    assert len(tg.sent) == 2 and "final" in tg.sent[1]         # the final attempt gets one alert of its own
+    client.fail_summaries = False                              # FPL comes back
+    assert tick(cfg, client, tg, d - pd.Timedelta(hours=8)) == 0
+    assert len(tg.sent) == 2 and "early look" in tg.sent[1]
+    st = load_state(cfg)
+    assert st["fail_streak"] == 0 and st["sent"]["7"] == ["early"]
+
+
+@needs_2026
+def test_scoring_problem_never_blocks_a_plan(tmp_path):
+    client, tg = make_client(), FakeTelegram()
+    client.fail_live = True                                    # scoring GW6 will fail
+    cfg = AgentConfig(team_id=1, horizon=2, root=tmp_path, chips=False)
+    (tmp_path / "logs" / "plans").mkdir(parents=True)
+    (tmp_path / "logs" / "plans" / "gw06-final.json").write_text(json.dumps({"gw": 6}), encoding="utf-8")
+    d = deadline(client, 7)
+    assert tick(cfg, client, tg, d - pd.Timedelta(hours=20)) == 0
+    assert len(tg.sent) == 1 and "GW7" in tg.sent[0]          # the plan still went out
+    assert load_state(cfg)["score_fails"] == {"6": 1}
+    tick(cfg, client, tg, d - pd.Timedelta(hours=19))
+    tick(cfg, client, tg, d - pd.Timedelta(hours=18))
+    assert len(tg.sent) == 2 and "Couldn't score GW6" in tg.sent[1]   # told once, after 3 tries
+    assert not (tmp_path / "logs" / "shadow.csv").exists()
 
 
 @needs_2026

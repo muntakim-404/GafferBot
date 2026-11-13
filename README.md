@@ -267,6 +267,13 @@ workflow fixes that, because requested runs start right away.
 ### Day to day
 - **No early message by 18 hours before a deadline, or no final by 3 hours?** Check the
   Actions tab, and set up "Reliable timing" above if you haven't.
+- **Failures:** one-off glitches (a blip reaching FPL, Telegram or the package server) are
+  retried at the next run without bothering you. You get a Telegram alert and a GitHub
+  failure email only when **3 runs in a row** fail (then every ~12 hours while it lasts),
+  or **immediately** if Telegram rejects the bot (wrong token or chat id). The hours right
+  after a deadline are quiet, because FPL is often down for updates then. A problem
+  scoring the shadow log never blocks a plan. The latest error is saved in
+  `state/agent_state.json` (`last_error`), so it can be diagnosed without the run logs.
 - **Changing the code later:** the bot commits its logs to GitHub, so in GitHub Desktop
   click **Fetch/Pull origin first**, then copy in new files, **Commit**, **Push origin**.
 - Scheduled jobs in public repos stop after 60 days without commits. The bot's own

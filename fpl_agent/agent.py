@@ -28,6 +28,7 @@ from .config import DEF, FWD, GK, MID, POS_NAME, ModelParams, SolverParams, capt
 from .data import load_live, team_state_public
 from .predictor import predict, xpts_matrix
 from .solver import solve, validate
+from .telegram import TelegramError
 
 # GitHub's "hourly" schedule can in practice run every 4-8 hours, so the windows
 # are wide enough that at least one run lands in each: the early plan is sent by
@@ -292,7 +293,8 @@ def append_shadow(cfg: AgentConfig, row: dict) -> pd.DataFrame:
 def shadow_summary(df: pd.DataFrame) -> str:
     if df.empty:
         return "No gameweeks scored yet."
-    fair = df[df["your_chip"].fillna("") == ""]
+    chip = df["your_chip"].astype(object).where(df["your_chip"].notna(), "")   # safe on all-empty columns
+    fair = df[chip == ""]
     tot = int(fair["diff"].sum())
     return (f"Season so far: plan {'+' if tot >= 0 else ''}{tot} pts vs you over {len(fair)} GW"
             f"{'s' if len(fair) != 1 else ''} (plan better in {(fair['diff'] > 0).sum()}, you in "
@@ -344,57 +346,87 @@ def handle_command(text: str, st: dict, next_gw: int | None, deadline, cfg: Agen
 
 
 # --------------------------------------------------------------------------- tick
+FAIL_ALERT_AFTER = 3      # failed runs in a row before you're alerted (~1.5h at a 30-min cadence)
+FAIL_REMIND_EVERY = 24    # while still failing, remind every N runs (~12h)
+QUIET_AFTER_DEADLINE = 4  # hours after a deadline when FPL is often down for updates
+
+
 def tick(cfg: AgentConfig, client, tg, now: pd.Timestamp | None = None, force: bool = False) -> int:
-    """One hourly run. Returns a process exit code (1 if something failed)."""
+    """One scheduled run. Returns a process exit code (1 makes GitHub email you).
+
+    One-off glitches (a blip reaching FPL or Telegram) are simply retried at the
+    next run. You're alerted, on Telegram if it works and by GitHub's failure
+    email, when runs fail FAIL_ALERT_AFTER times in a row, or straight away if
+    Telegram rejects the bot (wrong token or chat id), which can't fix itself.
+    """
     now = now or pd.Timestamp.now(tz="UTC")
     st = load_state(cfg)
-    code = 0
+    stage = ["starting"]
     try:
-        try:
-            bs = client.bootstrap(max_age=None)
-        except Exception as e:
-            print(traceback.format_exc())
-            key = f"fetch-{now:%Y-%m-%d}"
-            if key not in st["errors"]:       # at most one alert a day
-                st["errors"].append(key)
-                tg.send(f"⚠️ <b>Can't reach FPL</b>: {_e(type(e).__name__)}: {_e(str(e)[:300])}\n"
-                        f"This happens for an hour or two after each deadline while FPL updates. "
-                        f"If it keeps happening, FPL may be blocking GitHub's servers.")
-            return 1
-        ev = pd.DataFrame(bs["events"])
-        ev["deadline"] = pd.to_datetime(ev["deadline_time"], utc=True)
-        nxt = ev[ev["is_next"].astype(bool)]
-        next_gw = int(nxt["id"].iloc[0]) if len(nxt) else None
-        deadline = nxt["deadline"].iloc[0] if len(nxt) else None
-
-        # 1. commands
-        plan_now = force
-        for upd in tg.updates(st["telegram_offset"] + 1 if st["telegram_offset"] else 0):
-            st["telegram_offset"] = max(st["telegram_offset"], upd["update_id"])
-            msg = upd.get("message") or {}
-            if str(msg.get("chat", {}).get("id")) != str(tg.chat_id):
-                continue                         # ignore anyone else who finds the bot
-            reply, now_flag = handle_command(msg.get("text") or "", st, next_gw, deadline, cfg)
-            plan_now |= now_flag
-            if reply:
-                tg.send(reply)
+        _run(cfg, client, tg, now, force, st, stage)
+    except Exception as e:
+        print(traceback.format_exc())
+        return _on_failure(st, tg, e, stage[0], now)
+    else:
+        if st.get("fail_streak"):
+            print(f"Recovered after {st['fail_streak']} failed run(s).")
+            st["fail_streak"] = 0
+        return 0
+    finally:
         save_state(cfg, st)
 
-        # 2. score finished gameweeks
-        done = ev[ev["finished"].astype(bool) & ev.get("data_checked", ev["finished"]).astype(bool)]
-        for gw in sorted(int(g) for g in done["id"]):
-            if gw in st["scored"] or _best_plan_file(cfg, gw) is None:
-                continue
-            row = score_gameweek(cfg, client, gw)
-            if row:
-                df = append_shadow(cfg, row)
-                st["scored"].append(gw)
-                save_state(cfg, st)
-                tg.send(format_score(row, df))
 
-        # 3. deadline windows
-        if next_gw is None:
-            return code
+def _on_failure(st: dict, tg, e: Exception, stage: str, now: pd.Timestamp) -> int:
+    streak = st["fail_streak"] = st.get("fail_streak", 0) + 1
+    msg = f"{type(e).__name__}: {str(e)[:300]}"
+    st["last_error"] = {"at": now.isoformat(), "stage": stage, "error": msg, "streak": streak}
+    permanent = isinstance(e, TelegramError) and e.permanent
+    last_dl = st.get("last_deadline_utc")
+    after_deadline = (last_dl is not None and
+                      pd.Timestamp(last_dl) <= now <= pd.Timestamp(last_dl) + pd.Timedelta(hours=QUIET_AFTER_DEADLINE))
+    due = streak == FAIL_ALERT_AFTER or (streak > FAIL_ALERT_AFTER and streak % FAIL_REMIND_EVERY == 0)
+    if not permanent and (after_deadline or not due):
+        why = "FPL is usually updating after a deadline" if after_deadline else f"{streak} in a row so far"
+        print(f"Run failed while {stage} ({why}); retrying next run without alerting.")
+        return 0
+    if not isinstance(e, TelegramError):
+        try:
+            tg.send(f"⚠️ <b>The bot has failed {streak} runs in a row</b> while {_e(stage)}.\n"
+                    f"{_e(msg)}\nIt keeps retrying every run. If a deadline is close, make your moves "
+                    f"in the FPL app. If FPL can't be reached for hours outside a deadline, FPL may be "
+                    f"blocking GitHub's servers.")
+        except Exception as e2:
+            print(f"Couldn't alert on Telegram either: {e2}")
+    return 1
+
+
+def _run(cfg: AgentConfig, client, tg, now: pd.Timestamp, force: bool, st: dict, stage: list) -> None:
+    stage[0] = "reading FPL's gameweek list"
+    bs = client.bootstrap(max_age=None)
+    ev = pd.DataFrame(bs["events"])
+    ev["deadline"] = pd.to_datetime(ev["deadline_time"], utc=True)
+    nxt = ev[ev["is_next"].astype(bool)]
+    next_gw = int(nxt["id"].iloc[0]) if len(nxt) else None
+    deadline = nxt["deadline"].iloc[0] if len(nxt) else None
+    if deadline is not None:
+        st["last_deadline_utc"] = deadline.isoformat()
+
+    # 1. commands you sent the bot
+    stage[0] = "reading your Telegram messages"
+    plan_now = force
+    for upd in tg.updates(st["telegram_offset"] + 1 if st["telegram_offset"] else 0):
+        st["telegram_offset"] = max(st["telegram_offset"], upd["update_id"])
+        msg = upd.get("message") or {}
+        if str(msg.get("chat", {}).get("id")) != str(tg.chat_id):
+            continue                         # ignore anyone else who finds the bot
+        reply, now_flag = handle_command(msg.get("text") or "", st, next_gw, deadline, cfg)
+        plan_now |= now_flag
+        if reply:
+            tg.send(reply)
+    save_state(cfg, st)
+
+    # 2. deadline plans: time-critical, so before anything optional
+    if next_gw is not None:
         hours = (deadline - now).total_seconds() / 3600
         sent = st["sent"].setdefault(str(next_gw), [])
         window = None
@@ -404,29 +436,45 @@ def tick(cfg: AgentConfig, client, tg, now: pd.Timestamp | None = None, force: b
             window = "early"
         if window is None and plan_now:
             window = "manual"
-        if window is None:
-            return code
-
-        ft = st.get("ft")
-        ft_override = ft["value"] if ft and ft["gw"] == next_gw else None
-        key = f"GW{next_gw}-{window}"
-        try:
+        if window is not None:
+            ft = st.get("ft")
+            ft_override = ft["value"] if ft and ft["gw"] == next_gw else None
+            stage[0] = f"building the GW{next_gw} {window} plan"
             plan = build_plan(cfg, client, ft_override, window, now)
+            cfg.plans_dir.mkdir(parents=True, exist_ok=True)
+            (cfg.plans_dir / f"gw{plan['gw']:02d}-{window}.json").write_text(
+                json.dumps(plan, indent=2, default=str), encoding="utf-8")
+            stage[0] = "sending the plan to Telegram"
+            tg.send(format_plan(plan, cfg.tz, now))
+            if window != "manual":
+                sent.append(window)          # only once it's really been sent
+            save_state(cfg, st)
+
+    # 3. shadow log: optional, so a problem here never blocks a plan
+    stage[0] = "scoring finished gameweeks"
+    _score_finished(cfg, client, tg, ev, st, now)
+
+
+def _score_finished(cfg: AgentConfig, client, tg, ev: pd.DataFrame, st: dict, now: pd.Timestamp) -> None:
+    done = ev[ev["finished"].astype(bool) & ev.get("data_checked", ev["finished"]).astype(bool)]
+    fails = st.setdefault("score_fails", {})
+    for gw in sorted(int(g) for g in done["id"]):
+        if gw in st["scored"] or _best_plan_file(cfg, gw) is None:
+            continue
+        try:
+            row = score_gameweek(cfg, client, gw)
         except Exception as e:
-            code = 1
             print(traceback.format_exc())
-            if key not in st["errors"]:      # tell you once; retry silently next hour
-                st["errors"].append(key)
-                tg.send(f"⚠️ <b>Couldn't build the GW{next_gw} plan</b> ({_e(window)}): {_e(type(e).__name__)}: "
-                        f"{_e(str(e)[:300])}\nI'll retry every hour until the deadline. If nothing arrives, "
-                        f"make your moves in the FPL app.")
-            return code
-        cfg.plans_dir.mkdir(parents=True, exist_ok=True)
-        (cfg.plans_dir / f"gw{plan['gw']:02d}-{window}.json").write_text(
-            json.dumps(plan, indent=2, default=str), encoding="utf-8")
-        tg.send(format_plan(plan, cfg.tz, now))
-        if window != "manual":
-            sent.append(window)
-        return code
-    finally:
-        save_state(cfg, st)
+            n = fails[str(gw)] = fails.get(str(gw), 0) + 1
+            st["last_error"] = {"at": now.isoformat(), "stage": f"scoring GW{gw}",
+                                "error": f"{type(e).__name__}: {str(e)[:300]}", "streak": n}
+            if n == FAIL_ALERT_AFTER:
+                tg.send(f"<i>Couldn't score GW{gw} for the shadow log after {n} tries "
+                        f"({_e(type(e).__name__)}). Plans aren't affected; it keeps trying.</i>")
+            continue
+        if row:
+            df = append_shadow(cfg, row)
+            st["scored"].append(gw)          # before sending, so a send failure can't cause a duplicate row
+            fails.pop(str(gw), None)
+            save_state(cfg, st)
+            tg.send(format_score(row, df))
