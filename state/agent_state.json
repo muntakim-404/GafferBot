@@ -16,11 +16,11 @@
   "errors": [],
   "last_deadline_utc": "2026-11-21T11:00:00+00:00",
   "score_fails": {},
-  "fail_streak": 6,
+  "fail_streak": 7,
   "last_error": {
-    "at": "2026-11-19T03:30:43.198737+00:00",
+    "at": "2026-11-19T04:00:47.815009+00:00",
     "stage": "reading your Telegram messages",
     "error": "TelegramError: Telegram getUpdates error 502: Bad Gateway",
-    "streak": 6
+    "streak": 7
   }
 }
